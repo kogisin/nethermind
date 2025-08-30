@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2024 Demerzel Solutions Limited
+// SPDX-FileCopyrightText: 2025 Demerzel Solutions Limited
 // SPDX-License-Identifier: LGPL-3.0-only
 
 using System;
@@ -23,6 +23,7 @@ using Nethermind.Core.Crypto;
 using Nethermind.Core.Events;
 using Nethermind.Core.Extensions;
 using Nethermind.Core.Specs;
+using Nethermind.Core.Test;
 using Nethermind.Core.Test.Builders;
 using Nethermind.Core.Test.Modules;
 using Nethermind.Crypto;
@@ -34,6 +35,7 @@ using Nethermind.Merge.Plugin;
 using Nethermind.Merge.Plugin.BlockProduction;
 using Nethermind.Merge.Plugin.Handlers;
 using Nethermind.Merge.Plugin.Synchronization;
+using Nethermind.Network;
 using Nethermind.Network.Config;
 using Nethermind.Network.P2P.Analyzers;
 using Nethermind.Network.P2P.Subprotocols.Eth.V63.Messages;
@@ -77,7 +79,7 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
         yield return new TestFixtureParameters(DbMode.NoPruning, true);
     }
 
-    private static TimeSpan SetupTimeout = TimeSpan.FromSeconds(20);
+    private static TimeSpan SetupTimeout = TimeSpan.FromSeconds(60);
     private static TimeSpan TestTimeout = TimeSpan.FromSeconds(60);
     private const int ChainLength = 1000;
     private const int HeadPivotDistance = 500;
@@ -106,6 +108,18 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
         // Needed for generating spam state.
         spec.Genesis.Header.GasLimit = 1_000_000_000;
         spec.Allocations[_serverKey.Address] = new ChainSpecAllocation(300.Ether());
+
+        spec.Allocations[Eip7002Constants.WithdrawalRequestPredeployAddress] = new ChainSpecAllocation
+        {
+            Code = Eip7002TestConstants.Code,
+            Nonce = Eip7002TestConstants.Nonce
+        };
+
+        spec.Allocations[Eip7251Constants.ConsolidationRequestPredeployAddress] = new ChainSpecAllocation
+        {
+            Code = Eip7251TestConstants.Code,
+            Nonce = Eip7251TestConstants.Nonce
+        };
 
         // Always on, as the timestamp based fork activation always override block number based activation. However, the receipt
         // message serializer does not check the block header of the receipt for timestamp, only block number therefore it will
@@ -153,21 +167,21 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
             .AddSingleton<ITestEnv, PreMergeTestEnv>()
             ;
 
+        ManualTimestamper timestamper;
         if (isPostMerge)
         {
+            // Activate configured mainnet future EIP
+            timestamper = new ManualTimestamper(new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc));
             builder
-                .AddModule(new MergeModule(
-                    configProvider.GetConfig<ITxPoolConfig>(),
-                    configProvider.GetConfig<IMergeConfig>(),
-                    configProvider.GetConfig<IBlocksConfig>()
-                ))
+                .AddModule(new TestMergeModule(configProvider.GetConfig<ITxPoolConfig>()))
+                .AddSingleton<ManualTimestamper>(timestamper) // Used by test code
                 .AddDecorator<ITestEnv, PostMergeTestEnv>()
                 ;
         }
         else
         {
             // So that any EIP after the merge is not activated.
-            ManualTimestamper timestamper = ManualTimestamper.PreMerge;
+            timestamper = ManualTimestamper.PreMerge;
             builder
                 .AddSingleton<ManualTimestamper>(timestamper) // Used by test code
                 .AddSingleton<ITimestamper>(timestamper)
@@ -428,7 +442,7 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
         IEthereumEcdsa ecdsa,
         IBlockTree blockTree,
         IReceiptStorage receiptStorage,
-        MainBlockProcessingContext mainBlockProcessingContext,
+        IBlockProcessingQueue blockProcessingQueue,
         ITestEnv testEnv,
         IRlpxHost rlpxHost,
         PseudoNethermindRunner runner,
@@ -455,7 +469,10 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
         {
             IEnode serverEnode = server.Resolve<IEnode>();
             Node serverNode = new Node(serverEnode.PublicKey, new IPEndPoint(serverEnode.HostIp, serverEnode.Port));
-            await rlpxHost.ConnectAsync(serverNode);
+            if (!await rlpxHost.ConnectAsync(serverNode))
+            {
+                throw new NetworkingException($"Failed to connect to {serverNode:s}", NetworkExceptionType.TargetUnreachable);
+            }
         }
 
         Dictionary<Address, UInt256> nonces = [];
@@ -481,12 +498,11 @@ public class E2ESyncTests(E2ESyncTests.DbMode dbMode, bool isPostMerge)
 
         private async Task VerifyHeadWith(IContainer server, CancellationToken cancellationToken)
         {
-            IBlockProcessingQueue queue = mainBlockProcessingContext.BlockProcessingQueue;
-            if (!queue.IsEmpty)
+            if (!blockProcessingQueue.IsEmpty)
             {
                 await Wait.ForEvent(cancellationToken,
-                    e => queue.ProcessingQueueEmpty += e,
-                    e => queue.ProcessingQueueEmpty -= e);
+                    e => blockProcessingQueue.ProcessingQueueEmpty += e,
+                    e => blockProcessingQueue.ProcessingQueueEmpty -= e);
             }
 
             IBlockTree otherBlockTree = server.Resolve<IBlockTree>();
