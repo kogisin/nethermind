@@ -49,11 +49,14 @@ public interface IBlocksConfig : IConfig
     [ConfigItem(Description = "The genesis block load timeout, in milliseconds.", DefaultValue = "40000")]
     int GenesisTimeoutMs { get; set; }
 
-    [ConfigItem(Description = "The max transaction bytes to add in block production, in kilobytes.", DefaultValue = "9728")]
+    [ConfigItem(Description = "The max transaction bytes to add in block production, in kilobytes.", DefaultValue = "7936")]
     long BlockProductionMaxTxKilobytes { get; set; }
 
     [ConfigItem(Description = "The ticker that gas rewards are denominated in for processing logs", DefaultValue = "ETH", HiddenFromDocs = true)]
     string GasToken { get; set; }
+
+    [ConfigItem(Description = "Builds blocks on main (non-readonly) state", DefaultValue = "false", HiddenFromDocs = true)]
+    bool BuildBlocksOnMainState { get; set; }
 
     byte[] GetExtraDataBytes();
 }
